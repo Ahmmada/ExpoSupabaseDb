@@ -62,16 +62,16 @@ await db.execAsync(`
         birth_date TEXT, -- اختياري
         phone TEXT, -- اختياري
         address TEXT, -- اختياري
-        office_id INTEGER NOT NULL, -- إجباري (رابط بجدول المراكز)
-        level_id INTEGER NOT NULL, -- إجباري (رابط بجدول المستويات)
+        office_uuid TEXT NOT NULL, -- إجباري (رابط بجدول المراكز عبر UUID)
+        level_uuid TEXT NOT NULL, -- إجباري (رابط بجدول المستويات عبر UUID)
         supabase_id INTEGER UNIQUE,
         is_synced INTEGER DEFAULT 0,
         operation_type TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT,
         deleted_at TEXT,
-        FOREIGN KEY (office_id) REFERENCES offices(supabase_id),
-        FOREIGN KEY (level_id) REFERENCES levels(supabase_id)
+        FOREIGN KEY (office_uuid) REFERENCES offices(uuid),
+        FOREIGN KEY (level_uuid) REFERENCES levels(uuid)
       );
     `);
 
