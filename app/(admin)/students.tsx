@@ -38,6 +38,8 @@ import { getUnsyncedChanges, clearSyncedChange } from '@/lib/syncQueueDb';
 import NetInfo from '@react-native-community/netinfo';
 import { Picker } from '@react-native-picker/picker';
 import DatePickerInput from '@/components/DatePickerInput';
+import { exportStudentsToPdf } from '@/lib/pdfExporter';
+import StudentItem from '@/components/StudentItem'; 
 
 export default function StudentsScreen() {
   const [students, setStudents] = useState<Student[]>([]);
@@ -356,54 +358,12 @@ export default function StudentsScreen() {
   };
 
   const renderStudentItem = ({ item, index }: { item: Student; index: number }) => (
-    <View style={styles.studentItem}>
-      <View style={styles.studentInfo}>
-        <View style={styles.serialNumber}>
-          <Text style={styles.serialText}>{index + 1}</Text>
-        </View>
-        <View style={styles.studentDetails}>
-          <View style={styles.nameContainer}>
-            <Text style={styles.studentName}>{item.name}</Text>
-            {item.operation_type && (
-              <Text style={styles.syncStatus}>
-                (معلق - {item.operation_type})
-              </Text>
-            )}
-          </View>
-          <Text style={styles.studentId}>رقم التعريف (محلي): {item.id}</Text>
-          {item.supabase_id && (
-            <Text style={styles.studentId}>رقم التعريف (Supabase): {item.supabase_id}</Text>
-          )}
-          <Text style={styles.studentDetail}>المركز: {item.office_name || 'غير محدد'}</Text>
-          <Text style={styles.studentDetail}>المستوى: {item.level_name || 'غير محدد'}</Text>
-          {item.birth_date && (
-            <Text style={styles.studentDetail}>تاريخ الميلاد: {item.birth_date}</Text>
-          )}
-          {item.phone && (
-            <Text style={styles.studentDetail}>الهاتف: {item.phone}</Text>
-          )}
-          {item.address && (
-            <Text style={styles.studentDetail}>العنوان: {item.address}</Text>
-          )}
-        </View>
-      </View>
-      <View style={styles.studentActions}>
-        <TouchableOpacity
-          style={[styles.actionButton, styles.editButton]}
-          onPress={() => handleEdit(item)}
-        >
-          <Ionicons name="create-outline" size={18} color="#3b82f6" />
-          <Text style={styles.editText}>تعديل</Text>
-        </TouchableOpacity>
-        <TouchableOpacity
-          style={[styles.actionButton, styles.deleteButton]}
-          onPress={() => handleDelete(item.id)}
-        >
-          <Ionicons name="trash-outline" size={18} color="#ef4444" />
-          <Text style={styles.deleteText}>حذف</Text>
-        </TouchableOpacity>
-      </View>
-    </View>
+    <StudentItem
+      item={item}
+      index={index}
+      onEdit={handleEdit}
+      onDelete={handleDelete}
+    />
   );
 
   const EmptyState = () => (
@@ -430,16 +390,24 @@ export default function StudentsScreen() {
     <SafeAreaView style={styles.container}>
       <StatusBar barStyle="dark-content" backgroundColor="#f8fafc" />
 
-      <View style={styles.header}>
-        <Text style={styles.title}>الطلاب</Text>
+<View style={styles.header}>
+    <Text style={styles.title}>الطلاب</Text>
+    <View style={{ flexDirection: 'row', gap: 10 }}>
+        {/* زر تصدير التقرير */}
+<TouchableOpacity style={styles.exportButton} onPress={() => exportStudentsToPdf(filteredStudents)}>
+    <Ionicons name="share-outline" size={24} color="#6366f1" />
+    <Text style={styles.exportButtonText}>تصدير</Text>
+</TouchableOpacity>
+        {/* زر إضافة طالب جديد */}
         <TouchableOpacity style={styles.addButton} onPress={() => {
-          setModalVisible(true);
-          resetForm();
+            setModalVisible(true);
+            resetForm();
         }}>
-          <Ionicons name="add-circle" size={24} color="white" />
-          <Text style={styles.addButtonText}>طالب جديد</Text>
+            <Ionicons name="add-circle" size={24} color="white" />
+            <Text style={styles.addButtonText}>طالب جديد</Text>
         </TouchableOpacity>
-      </View>
+    </View>
+</View>
 
       {isConnected !== null && (
         <View
@@ -465,7 +433,7 @@ export default function StudentsScreen() {
 
       {searchQuery.length > 0 && students.length > 0 && <ResultsCount />}
 
-      <FlatList
+    <FlatList
         data={filteredStudents}
         keyExtractor={item => item.uuid || item.id.toString()}
         refreshing={loading}
@@ -746,4 +714,26 @@ const styles = StyleSheet.create({
   saveButton: { backgroundColor: '#6366f1' },
   cancelText: { color: '#374151', fontWeight: '600' },
   saveText: { color: 'white', fontWeight: '600' },
+
+   
+    exportButton: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        paddingHorizontal: 16,
+        paddingVertical: 8,
+        borderRadius: 8,
+        gap: 8,
+        backgroundColor: '#e0e7ff',
+        borderWidth: 1,
+        borderColor: '#6366f1',
+    },
+    exportButtonText: {
+        color: '#6366f1',
+        fontWeight: '600',
+        fontSize: 14
+    },
+  
+    
 });
+
+
