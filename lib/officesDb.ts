@@ -172,14 +172,13 @@ export const deleteLocalOfficeByUuidAndMarkSynced = async (uuid: string): Promis
 };
 
 
-export const fetchAndSyncRemoteOffices = async (): Promise<void> => { // إزالة userId كمعامل
+export const fetchAndSyncRemoteOffices = async (): Promise<void> => {
   const db = getDb();
   try {
-    // جلب جميع المراكز من Supabase (لأن RLS غير مفعلة)
+    // جلب المراكز من Supabase بناءً على صلاحيات المستخدم (RLS مفعلة)
     const { data: remoteOffices, error } = await supabase
       .from('offices')
       .select('*')
-      // .eq('user_id', userId) // تم إزالة هذا الفلتر
       .order('id', { ascending: true });
 
     if (error) throw error;
@@ -213,9 +212,9 @@ export const fetchAndSyncRemoteOffices = async (): Promise<void> => { // إزا�
         }
       }
     });
-    console.log('✅ تمت مزامنة المراكز البعيدة بنجاح مع المحلي.');
+    console.log('✅ تمت مزامنة المراكز من Supabase بنجاح.');
   } catch (error: any) {
-    console.error('❌ خطأ في جلب ومزامنة المراكز البعيدة:', error.message);
+    console.error('❌ خطأ في جلب ومزامنة المراكز:', error.message);
     throw error;
   }
 };

@@ -365,9 +365,9 @@ export const fetchAndSyncRemoteStudents = async (): Promise<void> => {
         }
       }
     });
-    console.log('✅ تمت مزامنة الطلاب البعيدة بنجاح مع المحلي.');
+    console.log('✅ تمت مزامنة الطلاب من Supabase بنجاح.');
   } catch (error: any) {
-    console.error('❌ خطأ في جلب ومزامنة الطلاب البعيدة:', error.message);
+    console.error('❌ خطأ في جلب ومزامنة الطلاب:', error.message);
     throw error;
   }
 };

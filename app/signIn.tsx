@@ -1,5 +1,4 @@
 // app/signIn.tsx
-import NetInfo from '@react-native-community/netinfo';
 import { useState, useEffect } from 'react';
 import {
   View,
@@ -12,11 +11,11 @@ import {
   StatusBar,
   ActivityIndicator,
 } from 'react-native';
-import { supabase } from '@/lib/supabase';
 import { router } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
-import { saveLocalProfile, getLocalProfile, verifyOfflinePassword } from '@/lib/localProfile';
 import * as SecureStore from 'expo-secure-store';
+import { authManager } from '@/lib/authManager';
+import { syncManager } from '@/lib/syncManager';
 
 const LAST_EMAIL_KEY = 'last_signIn_email';
 
@@ -44,62 +43,23 @@ export default function SignInScreen() {
   const handleSignIn = async () => {
     setLoading(true);
 
-    const netState = await NetInfo.fetch();
-    const isConnected = netState.isConnected;
-
     try {
-      if (!isConnected) {
-        // ------- وضع عدم الاتصال -------
-        const verified = await verifyOfflinePassword(email, password);
-        if (verified) {
-          router.replace(verified.role === 'admin' ? '/(admin)' : '/(user)');
-        } else {
-          Alert.alert('بيانات غير صحيحة أو غير متوفرة محليًا');
-        }
-        return;
-      }
-
-      // ------- وضع الاتصال بالإنترنت -------
-      const { data, error } = await supabase.auth.signInWithPassword({
-        email,
-        password,
-      });
-
-      if (error) {
-        Alert.alert('خطأ في تسجيل الدخول', error.message);
-      } else {
-        // حفظ آخر بريد إلكتروني
+      const result = await authManager.signIn(email, password);
+      
+      if (result.success && result.user) {
+        // حفظ آخر بريد إلكتروني عند نجاح تسجيل الدخول
         await SecureStore.setItemAsync(LAST_EMAIL_KEY, email);
 
-        const { data: profile } = await supabase
-          .from('profiles')
-          .select('role') // تأكد من جلب full_name و avatar_url
-          .eq('id', data.user.id)
-          .single();
-
-        if (profile) {
-          // حفظ ملف تعريف المستخدم محلياً للاستخدام في وضع عدم الاتصال
-          await saveLocalProfile({
-            supabase_id: data.user.id,
-            email: data.user.email,
-            role: profile.role,
-  full_name: data.user.user_metadata?.full_name,
-  avatar_url: data.user.user_metadata?.avatar_url,
-            password_hash: password,
-          });
-
-          // إعادة توجيه المستخدم بناءً على الدور
-          if (profile.role === 'admin') {
-            router.replace('/(admin)');
-          } else {
-            router.replace('/(user)');
-          }
-        } else {
-          Alert.alert('خطأ', 'فشل في جلب ملف تعريف المستخدم.');
-        }
+        // إعادة توجيه المستخدم بناءً على الدور
+        router.replace(result.user.role === 'admin' ? '/(admin)' : '/(user)');
+        
+        // بدء المزامنة التلقائية في الخلفية
+        syncManager.autoSync();
+      } else {
+        Alert.alert('خطأ في تسجيل الدخول', result.error || 'حدث خطأ غير متوقع');
       }
     } catch (error: any) {
-      Alert.alert('خطأ', error.message);
+      Alert.alert('خطأ', error.message || 'حدث خطأ غير متوقع');
     } finally {
       setLoading(false);
     }

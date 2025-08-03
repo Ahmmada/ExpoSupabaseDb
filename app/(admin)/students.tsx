@@ -17,6 +17,7 @@ import {
 import { supabase } from '@/lib/supabase';
 import { Ionicons } from '@expo/vector-icons';
 import SearchBar from '@/components/SearchBar';
+import SyncStatus from '@/components/SyncStatus';
 import {
   getLocalStudents,
   insertLocalStudent,
@@ -34,7 +35,7 @@ import {
 } from '@/lib/studentsDb';
 import { getLocalOffices } from '@/lib/officesDb';
 import { getLocalLevels } from '@/lib/levelsDb';
-import { getUnsyncedChanges, clearSyncedChange } from '@/lib/syncQueueDb';
+import { syncManager } from '@/lib/syncManager';
 import NetInfo from '@react-native-community/netinfo';
 import { Picker } from '@react-native-picker/picker';
 import DatePickerInput from '@/components/DatePickerInput';
@@ -65,6 +66,11 @@ export default function StudentsScreen() {
       try {
         unsubscribe = NetInfo.addEventListener(state => setIsConnected(state.isConnected));
         await Promise.all([fetchStudents(), loadOfficesAndLevels()]);
+        
+        // بدء المزامنة التلقائية إذا كان متصلاً
+        if (isConnected) {
+          syncManager.autoSync();
+        }
       } catch (error) {
         console.error('❌ Failed to prepare StudentsScreen:', error);
         Alert.alert('خطأ', 'فشل في تهيئة شاشة الطلاب');
@@ -103,153 +109,12 @@ export default function StudentsScreen() {
     }
   }, []);
 
-  const syncDataWithSupabase = useCallback(async () => {
-    if (!isConnected) {
-      console.log('Not connected to internet, skipping Supabase sync.');
-      return;
-    }
-
-    try {
-      const unsyncedChanges = await getUnsyncedChanges();
-      if (unsyncedChanges.length > 0) {
-        console.log(`Attempting to sync ${unsyncedChanges.length} changes...`);
-      }
-
-      await Promise.all(unsyncedChanges.map(async (change) => {
-        try {
-          if (change.entity === 'students') {
-            const payload = JSON.parse(change.payload);
-            let syncSuccessful = false;
-
-            if (change.operation === 'INSERT') {
-              // جلب office_id و level_id من Supabase باستخدام UUID
-              const [officeResult, levelResult] = await Promise.all([
-                supabase.from('offices').select('id').eq('uuid', payload.office_uuid).single(),
-                supabase.from('levels').select('id').eq('uuid', payload.level_uuid).single()
-              ]);
-
-              if (officeResult.error || levelResult.error) {
-                console.error('❌ Cannot find office or level in Supabase:', officeResult.error || levelResult.error);
-                return;
-              }
-
-              const { data, error } = await supabase
-                .from('students')
-                .insert([{
-                  uuid: payload.uuid,
-                  name: payload.name,
-                  birth_date: payload.birth_date || null,
-                  phone: payload.phone || null,
-                  address: payload.address || null,
-                  office_id: officeResult.data.id,
-                  level_id: levelResult.data.id,
-                  created_at: payload.created_at,
-                  updated_at: payload.updated_at,
-                  is_synced: true
-                }])
-                .select();
-
-              if (error) {
-                if (error.code === '23505' && error.message.includes('students_name_key')) {
-                  return new Promise<void>((resolve) => {
-                    Alert.alert(
-                      'تنبيه',
-                      `اسم الطالب "${payload.name}" موجود بالفعل. هل تريد حذف الإدخال المحلي؟`,
-                      [
-                        { text: 'إلغاء', style: 'cancel', onPress: () => resolve() },
-                        {
-                          text: 'حذف',
-                          style: 'destructive',
-                          onPress: async () => {
-                            await deleteLocalStudentByUuidAndMarkSynced(payload.uuid);
-                            await clearSyncedChange(change.id);
-                            resolve();
-                          },
-                        },
-                      ]
-                    );
-                  });
-                }
-                throw error;
-              }
-              if (data && data.length > 0) {
-                await updateLocalStudentSupabaseId(change.entity_local_id, change.entity_uuid, data[0].id);
-                await markStudentAsSynced(change.entity_local_id);
-                syncSuccessful = true;
-              }
-            } 
-            else if (change.operation === 'UPDATE') {
-              // جلب office_id و level_id من Supabase باستخدام UUID
-              const [officeResult, levelResult] = await Promise.all([
-                supabase.from('offices').select('id').eq('uuid', payload.office_uuid).single(),
-                supabase.from('levels').select('id').eq('uuid', payload.level_uuid).single()
-              ]);
-
-              if (officeResult.error || levelResult.error) {
-                console.error('❌ Cannot find office or level in Supabase:', officeResult.error || levelResult.error);
-                return;
-              }
-
-              const { error } = await supabase
-                .from('students')
-                .update({
-                  name: payload.name,
-                  birth_date: payload.birth_date || null,
-                  phone: payload.phone || null,
-                  address: payload.address || null,
-                  office_id: officeResult.data.id,
-                  level_id: levelResult.data.id,
-                  updated_at: payload.updated_at,
-                  is_synced: true
-                })
-                .eq('uuid', payload.uuid)
-                .is('deleted_at', null);
-
-              if (error) throw error;
-              await markStudentAsSynced(change.entity_local_id);
-              syncSuccessful = true;
-            }
-            else if (change.operation === 'DELETE') {
-              const { error } = await supabase
-                .from('students')
-                .update({
-                  deleted_at: payload.deleted_at,
-                  updated_at: payload.updated_at,
-                  is_synced: true
-                })
-                .eq('uuid', payload.uuid)
-                .is('deleted_at', null);
-              if (error) throw error;
-              syncSuccessful = true;
-            }
-
-            if (syncSuccessful) {
-              await clearSyncedChange(change.id);
-              console.log(`✅ Synced ${change.operation} for student UUID: ${change.entity_uuid}`);
-            }
-          }
-        } catch (error: any) {
-          console.error(`❌ Error syncing change ${change.id}:`, error.message);
-          Alert.alert('خطأ في المزامنة', `حدث خطأ أثناء مزامنة: ${error.message}`);
-        }
-      }));
-
-      await fetchStudents();
-      await fetchAndSyncRemoteStudents();
-    } catch (error: any) {
-      console.error('❌ Unexpected error during syncDataWithSupabase:', error.message);
-    }
-  }, [isConnected, fetchStudents]);
-
   useEffect(() => {
     const init = async () => {
       await fetchStudents();
-      if (isConnected) {
-        await syncDataWithSupabase();
-      }
     };
     init();
-  }, [fetchStudents, isConnected, syncDataWithSupabase]);
+  }, [fetchStudents]);
 
   useEffect(() => {
     if (searchQuery.trim() === '') {
@@ -310,8 +175,8 @@ export default function StudentsScreen() {
       setModalVisible(false);
       await fetchStudents();
 
-      if (isConnected) {
-        await syncDataWithSupabase();
+      // تشغيل المزامنة بعد الحفظ
+      syncManager.autoSync();
       }
     } catch (error: any) {
       Alert.alert('خطأ', error.message);
@@ -343,9 +208,9 @@ export default function StudentsScreen() {
               await deleteLocalStudent(id);
               await fetchStudents();
               setSearchQuery('');
-              if (isConnected) {
-                await syncDataWithSupabase();
-              }
+              
+              // تشغيل المزامنة بعد الحذف
+              syncManager.autoSync();
             } catch (error: any) {
               Alert.alert('خطأ في الحذف', error.message);
             }
@@ -441,25 +306,7 @@ export default function StudentsScreen() {
         </TouchableOpacity>
       </View>
 
-      {isConnected !== null && (
-        <View
-          style={{
-            paddingHorizontal: 16,
-            paddingVertical: 8,
-            backgroundColor: isConnected ? '#dcfce7' : '#fee2e2',
-          }}
-        >
-          <Text
-            style={{
-              color: isConnected ? '#16a34a' : '#dc2626',
-              fontWeight: 'bold',
-              textAlign: 'center',
-            }}
-          >
-            {isConnected ? 'متصل بالإنترنت' : 'غير متصل بالإنترنت'}
-          </Text>
-        </View>
-      )}
+      <SyncStatus />
 
       <SearchBar searchQuery={searchQuery} setSearchQuery={setSearchQuery} />
 
@@ -471,9 +318,7 @@ export default function StudentsScreen() {
         refreshing={loading}
         onRefresh={async () => {
           await fetchStudents();
-          if (isConnected) {
-            await syncDataWithSupabase();
-          }
+          syncManager.autoSync();
         }}
         renderItem={renderStudentItem}
         ListEmptyComponent={EmptyState}

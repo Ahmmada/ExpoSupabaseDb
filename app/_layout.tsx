@@ -1,19 +1,17 @@
 // app/_layout.tsx
-import 'react-native-get-random-values';
-import React, { useEffect, useState, useRef } from 'react';
+import React, { useEffect, useState } from 'react';
 import { DarkTheme, DefaultTheme, ThemeProvider } from '@react-navigation/native';
 import { useFonts } from 'expo-font';
 import { Stack, router, SplashScreen } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { initDb } from '@/lib/database';
 import 'react-native-reanimated';
-import { supabase } from '@/lib/supabase';
 import { Alert, View, ActivityIndicator, Text, StyleSheet } from 'react-native';
-import NetInfo from '@react-native-community/netinfo';
 import { useColorScheme } from '@/hooks/useColorScheme';
 import { Colors } from '@/constants/Colors';
-import { fetchAndSyncRemoteOffices } from '@/lib/officesDb';
-import { fetchAndSyncRemoteLevels } from '@/lib/levelsDb';
+import { authManager } from '@/lib/authManager';
+import { syncManager } from '@/lib/syncManager';
+import 'react-native-get-random-values';
 
 // منع إخفاء شاشة البداية تلقائياً حتى يكون التطبيق جاهزاً
 SplashScreen.preventAutoHideAsync();
@@ -25,118 +23,52 @@ export default function RootLayout() {
   });
 
   const [isAppReady, setIsAppReady] = useState(false);
-  const [finalTargetRoute, setFinalTargetRoute] = useState<string | null>(null);
-  const isInitialRedirectDone = useRef(false);
+  const [targetRoute, setTargetRoute] = useState<string>('/signIn');
 
-  // useEffect الأول: لتهيئة التطبيق وتحديد المسار المستهدف
+  // تهيئة التطبيق وتحديد المسار المستهدف
   useEffect(() => {
-    let authSubscription: { data: { subscription: any } } | null = null;
-    let netInfoUnsubscribe: (() => void) | undefined;
-
-    const initializeAppAndDetermineRoute = async () => {
+    const initializeApp = async () => {
       try {
+        // تهيئة قاعدة البيانات المحلية
         await initDb();
         console.log('✅ تم تهيئة قاعدة البيانات المحلية بنجاح.');
 
-        netInfoUnsubscribe = NetInfo.addEventListener(state => {
-          console.log('🔌 حالة الشبكة:', state.isConnected ? 'متصل' : 'غير متصل');
-        });
-
-        authSubscription = supabase.auth.onAuthStateChange(async (event, session) => {
-          console.log('🔑 حدث تغيير حالة المصادقة:', event);
-          if (event === 'SIGNED_OUT') {
-            await determineTargetRoute(null);
-          } else if (event === 'SIGNED_IN') {
-            await determineTargetRoute(session?.user);
-          } else if (event === 'INITIAL_SESSION' && !isInitialRedirectDone.current) {
-            await determineTargetRoute(session?.user);
-          }
-        });
-
-        const { data: { session }, error: sessionError } = await supabase.auth.getSession();
-        if (sessionError) {
-          console.error("❌ خطأ في الحصول على الجلسة عند بدء التشغيل:", sessionError.message);
-          if (!isInitialRedirectDone.current) {
-            await determineTargetRoute(null);
-          }
+        // التحقق من حالة المصادقة
+        const user = await authManager.checkAuthState();
+        
+        if (user) {
+          console.log('✅ تم العثور على مستخدم مسجل الدخول:', user.email);
+          setTargetRoute(user.role === 'admin' ? '/(admin)' : '/(user)');
+          
+          // بدء المزامنة التلقائية في الخلفية
+          syncManager.autoSync();
         } else {
-           if (!isInitialRedirectDone.current) {
-            await determineTargetRoute(session?.user);
-           }
+          console.log('❌ لم يتم العثور على مستخدم مسجل الدخول');
+          setTargetRoute('/signIn');
         }
 
       } catch (error) {
         console.error('❌ فشل في تهيئة التطبيق:', error);
-        setFinalTargetRoute('/signIn');
-        setIsAppReady(true);
+        setTargetRoute('/signIn');
       } finally {
+        setIsAppReady(true);
         SplashScreen.hideAsync();
       }
     };
 
-    initializeAppAndDetermineRoute();
-
-    return () => {
-      if (netInfoUnsubscribe) netInfoUnsubscribe();
-      if (authSubscription?.data?.subscription) {
-        authSubscription.data.subscription.unsubscribe();
-      }
-    };
+    initializeApp();
   }, []);
 
-  const determineTargetRoute = async (user: any | null) => {
-    let targetRoute = '/signIn';
-
-    // بغض النظر عن المستخدم، قم بمزامنة جميع المراكز والمستويات إذا كان متصلاً
-    const netState = await NetInfo.fetch();
-    if (netState.isConnected) {
-        console.log('🔄 مزامنة جميع المراكز والمستويات من Supabase (RLS معطلة)...');
-        try {
-            await Promise.all([
-                fetchAndSyncRemoteOffices(), 
-                fetchAndSyncRemoteLevels()  
-            ]);
-            console.log('✅ تمت مزامنة جميع المراكز والمستويات بنجاح.');
-        } catch (syncError) {
-            console.error('❌ خطأ في مزامنة المراكز والمستويات الأولية:', syncError);
-        }
-    }
-
-
-    if (user) {
-        console.log('✅ تحديد المسار المستهدف: تم العثور على مستخدم.');
-        try {
-            const { data: profile, error: profileError } = await supabase
-                .from('profiles')
-                .select('role')
-                .eq('id', user.id)
-                .single();
-
-            if (profileError) {
-                console.error("❌ خطأ في جلب ملف التعريف:", profileError.message);
-            } else {
-                targetRoute = profile.role === 'admin' ? '/(admin)' : '/(user)';
-            }
-        } catch (profileCatchError) {
-            console.error("❌ خطأ غير متوقع في جلب ملف التعريف:", profileCatchError);
-        }
-    } else {
-        console.log('❌ تحديد المسار المستهدف: لم يتم العثور على مستخدم.');
-    }
-    setFinalTargetRoute(targetRoute);
-    isInitialRedirectDone.current = true;
-    setIsAppReady(true);
-  };
-
+  // التوجيه عند جاهزية التطبيق
   useEffect(() => {
-    if (fontsLoaded && isAppReady && finalTargetRoute !== null) {
-      console.log(`✨ التوجيه الفعلي إلى: ${finalTargetRoute}`);
-      router.replace(finalTargetRoute);
+    if (fontsLoaded && isAppReady) {
+      console.log(`✨ التوجيه إلى: ${targetRoute}`);
+      router.replace(targetRoute);
       SplashScreen.hideAsync();
     }
-  }, [fontsLoaded, isAppReady, finalTargetRoute]);
+  }, [fontsLoaded, isAppReady, targetRoute]);
 
-  if (!fontsLoaded || !isAppReady || finalTargetRoute === null) {
+  if (!fontsLoaded || !isAppReady) {
     return (
       <View style={styles.loadingContainer}>
         <ActivityIndicator size="large" color={Colors[colorScheme ?? 'light'].tint} />
