@@ -173,14 +173,13 @@ export const deleteLocalLevelByUuidAndMarkSynced = async (uuid: string): Promise
 
 
 
-export const fetchAndSyncRemoteLevels = async (): Promise<void> => { // إزالة userId كمعامل
+export const fetchAndSyncRemoteLevels = async (): Promise<void> => {
   const db = getDb();
   try {
-    // جلب جميع المستويات من Supabase (لأن RLS غير مفعلة)
+    // جلب المستويات من Supabase بناءً على صلاحيات المستخدم (RLS مفعلة)
     const { data: remoteLevels, error } = await supabase
       .from('levels')
       .select('*')
-      // .eq('user_id', userId) // تم إزالة هذا الفلتر
       .order('id', { ascending: true });
 
     if (error) throw error;
@@ -206,7 +205,7 @@ export const fetchAndSyncRemoteLevels = async (): Promise<void> => { // إزال
         if (!localLevel) {
           await db.runAsync(
             `INSERT OR IGNORE INTO levels
-             (uuid, name, supabase_id, is_synced, operation_type, created_at, updated_at, deleted_at) -- إزالة user_id من هنا إذا لم يكن موجوداً في Supabase
+             (uuid, name, supabase_id, is_synced, operation_type, created_at, updated_at, deleted_at)
              VALUES (?, ?, ?, 1, NULL, ?, ?, ?);`,
             [
               remoteLevel.uuid,
@@ -215,7 +214,6 @@ export const fetchAndSyncRemoteLevels = async (): Promise<void> => { // إزال
               remoteLevel.created_at || new Date().toISOString(),
               remoteLevel.updated_at || remoteLevel.created_at || new Date().toISOString(),
               remoteLevel.deleted_at || null,
-              // remoteLevel.user_id || null // إزالة هذا إذا لم يتم استخدامه
             ]
           );
           console.log(`➕ Inserted new level from Supabase: ${remoteLevel.name}`);
@@ -233,9 +231,9 @@ export const fetchAndSyncRemoteLevels = async (): Promise<void> => { // إزال
         }
       }
     });
-    console.log('✅ تمت مزامنة المستويات البعيدة بنجاح مع المحلي.');
+    console.log('✅ تمت مزامنة المستويات من Supabase بنجاح.');
   } catch (error: any) {
-    console.error('❌ خطأ في جلب ومزامنة المستويات البعيدة:', error.message);
+    console.error('❌ خطأ في جلب ومزامنة المستويات:', error.message);
     throw error;
   }
 };

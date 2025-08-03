@@ -1,14 +1,13 @@
 // app/(admin)/_layout.tsx
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { Drawer } from 'expo-router/drawer';
 import { useColorScheme } from '@/hooks/useColorScheme';
 import { Colors } from '@/constants/Colors';
 import { MaterialCommunityIcons, FontAwesome6 } from '@expo/vector-icons';
-import { supabase } from '@/lib/supabase';
 import { router } from 'expo-router';
 import { Alert, View, ActivityIndicator, Text, StyleSheet, TouchableOpacity } from 'react-native';
-import NetInfo from '@react-native-community/netinfo';
 import { Ionicons } from '@expo/vector-icons';
+import { authManager } from '@/lib/authManager';
 
 export default function AdminDrawerLayout() {
   const colorScheme = useColorScheme();
@@ -26,23 +25,16 @@ export default function AdminDrawerLayout() {
           onPress: async () => {
             setLoading(true);
             try {
-   //           const netState = await NetInfo.fetch(); // التحقق من حالة الاتصال بالإنترنت
- //             const isConnected = netState.isConnected;
 
-              // إذا كان متصلاً بالإنترنت، حاول تسجيل الخروج من Supabase
-  //            if (isConnected) {
- //               const { error } = await supabase.auth.signOut();
- //               if (error) {
- //                 Alert.alert('خطأ في تسجيل الخروج عبر الإنترنت', error.message);
- //                 setLoading(false);
- //                 return; // توقف هنا إذا كان هناك خطأ في Supabase
-//                }
-//              }
 
-              // بعد تسجيل الخروج من Supabase (إذا كان متصلاً) أو في وضع عدم الاتصال
-              // نقوم ببساطة بإعادة توجيه المستخدم إلى صفحة تسجيل الدخول
-              Alert.alert('تم تسجيل الخروج', 'تم تسجيل خروجك بنجاح.');
-              router.replace('/signIn'); // إعادة توجيه إلى شاشة تسجيل الدخول
+              const result = await authManager.signOut();
+              
+              if (result.success) {
+                Alert.alert('تم تسجيل الخروج', 'تم تسجيل خروجك بنجاح.');
+                router.replace('/signIn');
+              } else {
+                Alert.alert('خطأ في تسجيل الخروج', result.error || 'حدث خطأ غير متوقع');
+              }
             } catch (error: any) {
               Alert.alert('خطأ في تسجيل الخروج', error.message);
             } finally {
