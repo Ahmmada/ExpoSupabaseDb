@@ -11,12 +11,14 @@ import { useColorScheme } from '@/hooks/useColorScheme';
 import { Colors } from '@/constants/Colors';
 import { authManager } from '@/lib/authManager';
 import { syncManager } from '@/lib/syncManager';
-import 'react-native-get-random-values';
+import 'react-native-get-random-values'
+import { useFrameworkReady } from '@/hooks/useFrameworkReady';
 
 // منع إخفاء شاشة البداية تلقائياً حتى يكون التطبيق جاهزاً
 SplashScreen.preventAutoHideAsync();
 
 export default function RootLayout() {
+  useFrameworkReady();
   const colorScheme = useColorScheme();
   const [fontsLoaded] = useFonts({
     SpaceMono: require('../assets/fonts/SpaceMono-Regular.ttf'),
