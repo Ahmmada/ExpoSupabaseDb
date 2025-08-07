@@ -1,4 +1,4 @@
-// app/(tabs)/offices.tsx
+// app/(admin)/offices.tsx
 import { useEffect, useState, useCallback } from 'react';
 import {
   View,
@@ -20,15 +20,10 @@ import {
   insertLocalOffice,
   updateLocalOffice,
   deleteLocalOffice,
-  updateLocalOfficeSupabaseId,
   Office,
-  markOfficeAsSynced,
-  markRemoteDeletedLocally,
-  updateLocalOfficeFieldsBySupabase,
-  insertFromSupabaseIfNotExists,
-  deleteLocalOfficeByUuidAndMarkSynced,
 } from '@/lib/officesDb';
-import { getUnsyncedChanges, clearSyncedChange } from '@/lib/syncQueueDb';
+import { syncManager } from '@/lib/syncManager';
+import SyncButton from '@/components/SyncButton';
 import NetInfo from '@react-native-community/netinfo';
 
 export default function OfficesScreen() {
@@ -40,6 +35,7 @@ export default function OfficesScreen() {
   const [modalVisible, setModalVisible] = useState(false);
   const [editingId, setEditingId] = useState<number | null>(null);
   const [isConnected, setIsConnected] = useState<boolean | null>(null);
+  const [syncMessage, setSyncMessage] = useState<string>('');
 
   useEffect(() => {
     let unsubscribe: (() => void) | undefined;
@@ -71,168 +67,19 @@ export default function OfficesScreen() {
     }
   }, []);
 
-  const syncDataWithSupabase = useCallback(async () => {
-    if (!isConnected) {
-      console.log('Not connected to internet, skipping Supabase sync.');
-      return;
+  const handleSyncComplete = useCallback((success: boolean, message: string) => {
+    setSyncMessage(message);
+    if (success) {
+      fetchOffices(); // تحديث القائمة بعد المزامنة الناجحة
     }
-
-    try {
-      const unsyncedChanges = await getUnsyncedChanges();
-      if (unsyncedChanges.length > 0) {
-        console.log(`Attempting to sync ${unsyncedChanges.length} changes...`);
-      }
-
-      await Promise.all(unsyncedChanges.map(async (change) => {
-        try {
-          if (change.entity === 'offices') {
-            const payload = JSON.parse(change.payload);
-            let syncSuccessful = false;
-
-            if (change.operation === 'INSERT') {
-              const { data, error } = await supabase
-                .from('offices')
-                .insert([{
-                  uuid: payload.uuid,
-                  name: payload.name,
-                  created_at: payload.created_at,
-                  updated_at: payload.updated_at,
-                  is_synced: true
-                }])
-                .select();
-              if (error) {
-                if (error.code === '23505' && error.message.includes('offices_name_key')) {
-                  return new Promise<void>((resolve) => {
-                    Alert.alert(
-                      'تنبيه',
-                      `اسم المركز "${payload.name}" موجود بالفعل. هل تريد حذف الإدخال المحلي؟`,
-                      [
-                        { text: 'إلغاء', style: 'cancel', onPress: () => resolve() },
-                        {
-                          text: 'حذف',
-                          style: 'destructive',
-                          onPress: async () => {
-                            await deleteLocalOfficeByUuidAndMarkSynced(payload.uuid);
-                            await clearSyncedChange(change.id);
-                            resolve();
-                          },
-                        },
-                      ]
-                    );
-                  });
-                }
-                throw error;
-              }
-              if (data && data.length > 0) {
-                await updateLocalOfficeSupabaseId(change.entity_local_id, change.entity_uuid, data[0].id);
-                await markOfficeAsSynced(change.entity_local_id);
-                syncSuccessful = true;
-              }
-            } 
-              else if (change.operation === 'UPDATE') {
-  const { error } = await supabase
-    .from('offices')
-    .update({
-      name: payload.name,
-      updated_at: payload.updated_at,
-      is_synced: true
-    })
-    .eq('uuid', payload.uuid)
-    .is('deleted_at', null);
-
-  if (error) {
-    // معالجة الخطأ...
-  } else {
-    await markOfficeAsSynced(change.entity_local_id); // ✅ إضافة هذا السطر
-    syncSuccessful = true;
-  }
-}
-            else if (change.operation === 'DELETE') {
-              const { error } = await supabase
-                .from('offices')
-                .update({
-                  deleted_at: payload.deleted_at,
-                  updated_at: payload.updated_at,
-                  is_synced: true
-                })
-                .eq('uuid', payload.uuid)
-                .is('deleted_at', null);
-              if (error) throw error;
-              syncSuccessful = true;
-            }
-
-            if (syncSuccessful) {
-              await clearSyncedChange(change.id);
-              console.log(`✅ Synced ${change.operation} for office UUID: ${change.entity_uuid}`);
-            }
-          }
-        } catch (error: any) {
-          console.error(`❌ Error syncing change ${change.id}:`, error.message);
-          Alert.alert('خطأ في المزامنة', `حدث خطأ أثناء مزامنة: ${error.message}`);
-        }
-      }));
-
-      await fetchOffices();
-      await fetchRemoteOfficesAndMerge();
-    } catch (error: any) {
-      console.error('❌ Unexpected error during syncDataWithSupabase:', error.message);
+    if (message) {
+      Alert.alert(success ? 'نجاح المزامنة' : 'خطأ في المزامنة', message);
     }
-  }, [isConnected, fetchOffices, fetchRemoteOfficesAndMerge]);
-
-  const fetchRemoteOfficesAndMerge = useCallback(async () => {
-    if (!isConnected) return;
-
-    try {
-      const { data: remoteOffices, error } = await supabase
-        .from('offices')
-        .select('*')
-        .order('id', { ascending: true });
-      if (error) throw error;
-
-      const localOffices = await getLocalOffices();
-
-      await Promise.all(remoteOffices.map(async (remoteOffice) => {
-        if (remoteOffice.deleted_at) {
-          const existingLocal = localOffices.find(l => l.uuid === remoteOffice.uuid);
-          if (existingLocal && !existingLocal.deleted_at) {
-            await markRemoteDeletedLocally(remoteOffice.id, remoteOffice.deleted_at);
-            console.log(`🗑️ Marked remote deleted office locally: ${remoteOffice.name}`);
-          }
-          return;
-        }
-
-        const localOffice = localOffices.find(l => l.uuid === remoteOffice.uuid);
-
-        if (!localOffice) {
-          await insertFromSupabaseIfNotExists(remoteOffice);
-          console.log(`➕ Inserted new office from Supabase: ${remoteOffice.name}`);
-        } else {
-          const remoteUpdate = new Date(remoteOffice.updated_at || remoteOffice.created_at || 0).getTime();
-          const localUpdate = new Date(localOffice.updated_at || localOffice.created_at || 0).getTime();
-
-          if (remoteUpdate > localUpdate) {
-            await updateLocalOfficeFieldsBySupabase(remoteOffice);
-            console.log(`🔄 Updated local office from Supabase: ${localOffice.name}`);
-          }
-        }
-      }));
-
-      await fetchOffices();
-    } catch (error: any) {
-      console.error('❌ Error fetching remote offices:', error.message);
-      Alert.alert('خطأ في جلب بيانات Supabase', error.message);
-    }
-  }, [isConnected, fetchOffices]);
+  }, [fetchOffices]);
 
   useEffect(() => {
-    const init = async () => {
-      await fetchOffices();
-      if (isConnected) {
-        await syncDataWithSupabase();
-      }
-    };
-    init();
-  }, [fetchOffices, isConnected, syncDataWithSupabase]);
+    fetchOffices();
+  }, [fetchOffices]);
 
   useEffect(() => {
     if (searchQuery.trim() === '') {
@@ -265,8 +112,13 @@ export default function OfficesScreen() {
       setModalVisible(false);
       await fetchOffices();
 
+      // المزامنة التلقائية بعد الحفظ
       if (isConnected) {
-        await syncDataWithSupabase();
+        try {
+          await syncManager.syncEntity('offices');
+        } catch (error) {
+          console.error('❌ خطأ في المزامنة التلقائية:', error);
+        }
       }
     } catch (error: any) {
       Alert.alert('خطأ', error.message);
@@ -288,8 +140,14 @@ export default function OfficesScreen() {
               await deleteLocalOffice(id);
               await fetchOffices();
               setSearchQuery('');
+              
+              // المزامنة التلقائية بعد الحذف
               if (isConnected) {
-                await syncDataWithSupabase();
+                try {
+                  await syncManager.syncEntity('offices');
+                } catch (error) {
+                  console.error('❌ خطأ في المزامنة التلقائية:', error);
+                }
               }
             } catch (error: any) {
               Alert.alert('خطأ في الحذف', error.message);
@@ -371,14 +229,22 @@ export default function OfficesScreen() {
 
       <View style={styles.header}>
         <Text style={styles.title}>المراكز</Text>
-        <TouchableOpacity style={styles.addButton} onPress={() => {
-          setModalVisible(true);
-          setName('');
-          setEditingId(null);
-        }}>
-          <Ionicons name="add-circle" size={24} color="white" />
-          <Text style={styles.addButtonText}>مركز جديد</Text>
-        </TouchableOpacity>
+        <View style={styles.headerActions}>
+          <SyncButton 
+            entityType="offices"
+            onSyncComplete={handleSyncComplete}
+            size="small"
+            showLabel={false}
+          />
+          <TouchableOpacity style={styles.addButton} onPress={() => {
+            setModalVisible(true);
+            setName('');
+            setEditingId(null);
+          }}>
+            <Ionicons name="add-circle" size={24} color="white" />
+            <Text style={styles.addButtonText}>مركز جديد</Text>
+          </TouchableOpacity>
+        </View>
       </View>
 
       {isConnected !== null && (
@@ -411,9 +277,6 @@ export default function OfficesScreen() {
         refreshing={loading}
         onRefresh={async () => {
           await fetchOffices();
-          if (isConnected) {
-            await syncDataWithSupabase();
-          }
         }}
         renderItem={renderOfficeItem}
         ListEmptyComponent={EmptyState}
@@ -496,6 +359,11 @@ const styles = StyleSheet.create({
     borderBottomColor: '#e2e8f0',
   },
   title: { fontSize: 28, fontWeight: 'bold', color: '#1e293b' },
+  headerActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
   addButton: {
     flexDirection: 'row',
     alignItems: 'center',

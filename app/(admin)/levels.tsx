@@ -1,4 +1,4 @@
-// app/(tabs)/levels.tsx
+// app/(admin)/levels.tsx
 import { useEffect, useState, useCallback } from 'react';
 import {
   View,
@@ -20,15 +20,10 @@ import {
   insertLocalLevel,
   updateLocalLevel,
   deleteLocalLevel,
-  updateLocalLevelSupabaseId,
   Level,
-  markLevelAsSynced,
-  markRemoteDeletedLocally,
-  updateLocalLevelFieldsBySupabase,
-  insertFromSupabaseIfNotExists,
-  deleteLocalLevelByUuidAndMarkSynced,
 } from '@/lib/levelsDb';
-import { getUnsyncedChanges, clearSyncedChange } from '@/lib/syncQueueDb';
+import { syncManager } from '@/lib/syncManager';
+import SyncButton from '@/components/SyncButton';
 import NetInfo from '@react-native-community/netinfo';
 
 export default function LevelsScreen() {
@@ -40,6 +35,7 @@ export default function LevelsScreen() {
   const [modalVisible, setModalVisible] = useState(false);
   const [editingId, setEditingId] = useState<number | null>(null);
   const [isConnected, setIsConnected] = useState<boolean | null>(null);
+  const [syncMessage, setSyncMessage] = useState<string>('');
 
   useEffect(() => {
     let unsubscribe: (() => void) | undefined;
@@ -71,168 +67,19 @@ export default function LevelsScreen() {
     }
   }, []);
 
-  const syncDataWithSupabase = useCallback(async () => {
-    if (!isConnected) {
-      console.log('Not connected to internet, skipping Supabase sync.');
-      return;
+  const handleSyncComplete = useCallback((success: boolean, message: string) => {
+    setSyncMessage(message);
+    if (success) {
+      fetchLevels(); // تحديث القائمة بعد المزامنة الناجحة
     }
-
-    try {
-      const unsyncedChanges = await getUnsyncedChanges();
-      if (unsyncedChanges.length > 0) {
-        console.log(`Attempting to sync ${unsyncedChanges.length} changes...`);
-      }
-
-      await Promise.all(unsyncedChanges.map(async (change) => {
-        try {
-          if (change.entity === 'levels') {
-            const payload = JSON.parse(change.payload);
-            let syncSuccessful = false;
-
-            if (change.operation === 'INSERT') {
-              const { data, error } = await supabase
-                .from('levels')
-                .insert([{
-                  uuid: payload.uuid,
-                  name: payload.name,
-                  created_at: payload.created_at,
-                  updated_at: payload.updated_at,
-                  is_synced: true
-                }])
-                .select();
-              if (error) {
-                if (error.code === '23505' && error.message.includes('levels_name_key')) {
-                  return new Promise<void>((resolve) => {
-                    Alert.alert(
-                      'تنبيه',
-                      `اسم المستوى "${payload.name}" موجود بالفعل. هل تريد حذف الإدخال المحلي؟`,
-                      [
-                        { text: 'إلغاء', style: 'cancel', onPress: () => resolve() },
-                        {
-                          text: 'حذف',
-                          style: 'destructive',
-                          onPress: async () => {
-                            await deleteLocalLevelByUuidAndMarkSynced(payload.uuid);
-                            await clearSyncedChange(change.id);
-                            resolve();
-                          },
-                        },
-                      ]
-                    );
-                  });
-                }
-                throw error;
-              }
-              if (data && data.length > 0) {
-                await updateLocalLevelSupabaseId(change.entity_local_id, change.entity_uuid, data[0].id);
-                await markLevelAsSynced(change.entity_local_id);
-                syncSuccessful = true;
-              }
-            } 
-              else if (change.operation === 'UPDATE') {
-  const { error } = await supabase
-    .from('levels')
-    .update({
-      name: payload.name,
-      updated_at: payload.updated_at,
-      is_synced: true
-    })
-    .eq('uuid', payload.uuid)
-    .is('deleted_at', null);
-
-  if (error) {
-    // معالجة الخطأ...
-  } else {
-    await markLevelAsSynced(change.entity_local_id); // ✅ إضافة هذا السطر
-    syncSuccessful = true;
-  }
-}
-            else if (change.operation === 'DELETE') {
-              const { error } = await supabase
-                .from('levels')
-                .update({
-                  deleted_at: payload.deleted_at,
-                  updated_at: payload.updated_at,
-                  is_synced: true
-                })
-                .eq('uuid', payload.uuid)
-                .is('deleted_at', null);
-              if (error) throw error;
-              syncSuccessful = true;
-            }
-
-            if (syncSuccessful) {
-              await clearSyncedChange(change.id);
-              console.log(`✅ Synced ${change.operation} for level UUID: ${change.entity_uuid}`);
-            }
-          }
-        } catch (error: any) {
-          console.error(`❌ Error syncing change ${change.id}:`, error.message);
-          Alert.alert('خطأ في المزامنة', `حدث خطأ أثناء مزامنة: ${error.message}`);
-        }
-      }));
-
-      await fetchLevels();
-      await fetchRemoteLevelsAndMerge();
-    } catch (error: any) {
-      console.error('❌ Unexpected error during syncDataWithSupabase:', error.message);
+    if (message) {
+      Alert.alert(success ? 'نجاح المزامنة' : 'خطأ في المزامنة', message);
     }
-  }, [isConnected, fetchLevels, fetchRemoteLevelsAndMerge]);
-
-  const fetchRemoteLevelsAndMerge = useCallback(async () => {
-    if (!isConnected) return;
-
-    try {
-      const { data: remoteLevels, error } = await supabase
-        .from('levels')
-        .select('*')
-        .order('id', { ascending: true });
-      if (error) throw error;
-
-      const localLevels = await getLocalLevels();
-
-      await Promise.all(remoteLevels.map(async (remoteLevel) => {
-        if (remoteLevel.deleted_at) {
-          const existingLocal = localLevels.find(l => l.uuid === remoteLevel.uuid);
-          if (existingLocal && !existingLocal.deleted_at) {
-            await markRemoteDeletedLocally(remoteLevel.id, remoteLevel.deleted_at);
-            console.log(`🗑️ Marked remote deleted level locally: ${remoteLevel.name}`);
-          }
-          return;
-        }
-
-        const localLevel = localLevels.find(l => l.uuid === remoteLevel.uuid);
-
-        if (!localLevel) {
-          await insertFromSupabaseIfNotExists(remoteLevel);
-          console.log(`➕ Inserted new level from Supabase: ${remoteLevel.name}`);
-        } else {
-          const remoteUpdate = new Date(remoteLevel.updated_at || remoteLevel.created_at || 0).getTime();
-          const localUpdate = new Date(localLevel.updated_at || localLevel.created_at || 0).getTime();
-
-          if (remoteUpdate > localUpdate) {
-            await updateLocalLevelFieldsBySupabase(remoteLevel);
-            console.log(`🔄 Updated local level from Supabase: ${localLevel.name}`);
-          }
-        }
-      }));
-
-      await fetchLevels();
-    } catch (error: any) {
-      console.error('❌ Error fetching remote levels:', error.message);
-      Alert.alert('خطأ في جلب بيانات Supabase', error.message);
-    }
-  }, [isConnected, fetchLevels]);
+  }, [fetchLevels]);
 
   useEffect(() => {
-    const init = async () => {
-      await fetchLevels();
-      if (isConnected) {
-        await syncDataWithSupabase();
-      }
-    };
-    init();
-  }, [fetchLevels, isConnected, syncDataWithSupabase]);
+    fetchLevels();
+  }, [fetchLevels]);
 
   useEffect(() => {
     if (searchQuery.trim() === '') {
@@ -265,8 +112,13 @@ export default function LevelsScreen() {
       setModalVisible(false);
       await fetchLevels();
 
+      // المزامنة التلقائية بعد الحفظ
       if (isConnected) {
-        await syncDataWithSupabase();
+        try {
+          await syncManager.syncEntity('levels');
+        } catch (error) {
+          console.error('❌ خطأ في المزامنة التلقائية:', error);
+        }
       }
     } catch (error: any) {
       Alert.alert('خطأ', error.message);
@@ -288,8 +140,14 @@ export default function LevelsScreen() {
               await deleteLocalLevel(id);
               await fetchLevels();
               setSearchQuery('');
+              
+              // المزامنة التلقائية بعد الحذف
               if (isConnected) {
-                await syncDataWithSupabase();
+                try {
+                  await syncManager.syncEntity('levels');
+                } catch (error) {
+                  console.error('❌ خطأ في المزامنة التلقائية:', error);
+                }
               }
             } catch (error: any) {
               Alert.alert('خطأ في الحذف', error.message);
@@ -371,14 +229,22 @@ export default function LevelsScreen() {
 
       <View style={styles.header}>
         <Text style={styles.title}>المستويات</Text>
-        <TouchableOpacity style={styles.addButton} onPress={() => {
-          setModalVisible(true);
-          setName('');
-          setEditingId(null);
-        }}>
-          <Ionicons name="add-circle" size={24} color="white" />
-          <Text style={styles.addButtonText}>مستوى جديد</Text>
-        </TouchableOpacity>
+        <View style={styles.headerActions}>
+          <SyncButton 
+            entityType="levels"
+            onSyncComplete={handleSyncComplete}
+            size="small"
+            showLabel={false}
+          />
+          <TouchableOpacity style={styles.addButton} onPress={() => {
+            setModalVisible(true);
+            setName('');
+            setEditingId(null);
+          }}>
+            <Ionicons name="add-circle" size={24} color="white" />
+            <Text style={styles.addButtonText}>مستوى جديد</Text>
+          </TouchableOpacity>
+        </View>
       </View>
 
       {isConnected !== null && (
@@ -411,9 +277,6 @@ export default function LevelsScreen() {
         refreshing={loading}
         onRefresh={async () => {
           await fetchLevels();
-          if (isConnected) {
-            await syncDataWithSupabase();
-          }
         }}
         renderItem={renderLevelItem}
         ListEmptyComponent={EmptyState}
@@ -496,6 +359,11 @@ const styles = StyleSheet.create({
     borderBottomColor: '#e2e8f0',
   },
   title: { fontSize: 28, fontWeight: 'bold', color: '#1e293b' },
+  headerActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
   addButton: {
     flexDirection: 'row',
     alignItems: 'center',
