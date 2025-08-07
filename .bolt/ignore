@@ -10,7 +10,6 @@ scripts/
 README.md
 package.json
 package-lock.json
-expo-env.d.ts
 eas.json
 tsconfig.json
 eslint.config.json
