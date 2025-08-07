@@ -13,113 +13,72 @@ import {
   ScrollView,
   Platform,
   FlatList,
-  ActivityIndicator,
 } from 'react-native';
+import { supabase } from '@/lib/supabase';
 import { Ionicons } from '@expo/vector-icons';
-import { Picker } from '@react-native-picker/picker';
 import SearchBar from '@/components/SearchBar';
-import SyncStatus from '@/components/SyncStatus';
-import StudentItem from '@/components/StudentItem';
-import DatePickerInput from '@/components/DatePickerInput';
-import { exportStudentsToPdf } from '@/lib/pdfExporter';
 import {
   getLocalStudents,
   insertLocalStudent,
   updateLocalStudent,
   deleteLocalStudent,
+  updateLocalStudentSupabaseId,
   Student,
+  markStudentAsSynced,
+  markRemoteDeletedLocally,
+  updateLocalStudentFieldsBySupabase,
+  insertFromSupabaseIfNotExists,
+  deleteLocalStudentByUuidAndMarkSynced,
+  getStudentByUuid,
+  fetchAndSyncRemoteStudents,
 } from '@/lib/studentsDb';
-import { getLocalOffices, Office } from '@/lib/officesDb';
-import { getLocalLevels, Level } from '@/lib/levelsDb';
-import { syncManager } from '@/lib/syncManager';
-import { authManager } from '@/lib/authManager';
+import { getLocalOffices } from '@/lib/officesDb';
+import { getLocalLevels } from '@/lib/levelsDb';
+import { getUnsyncedChanges, clearSyncedChange } from '@/lib/syncQueueDb';
 import NetInfo from '@react-native-community/netinfo';
+import { Picker } from '@react-native-picker/picker';
+import DatePickerInput from '@/components/DatePickerInput';
+import { exportStudentsToPdf } from '@/lib/pdfExporter';
+import StudentItem from '@/components/StudentItem'; 
 
 export default function StudentsScreen() {
-  // حالات البيانات الأساسية
   const [students, setStudents] = useState<Student[]>([]);
   const [filteredStudents, setFilteredStudents] = useState<Student[]>([]);
-  const [offices, setOffices] = useState<Office[]>([]);
-  const [levels, setLevels] = useState<Level[]>([]);
   const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
+  const [offices, setOffices] = useState<any[]>([]);
+  const [levels, setLevels] = useState<any[]>([]);
 
-  // حالات النموذج
-  const [modalVisible, setModalVisible] = useState(false);
-  const [editingId, setEditingId] = useState<number | null>(null);
+  // حقول النموذج
   const [name, setName] = useState('');
   const [birthDate, setBirthDate] = useState('');
   const [phone, setPhone] = useState('');
   const [address, setAddress] = useState('');
   const [selectedOfficeUuid, setSelectedOfficeUuid] = useState<string | null>(null);
   const [selectedLevelUuid, setSelectedLevelUuid] = useState<string | null>(null);
-  const [saving, setSaving] = useState(false);
 
-  // حالات أخرى
   const [searchQuery, setSearchQuery] = useState('');
+  const [modalVisible, setModalVisible] = useState(false);
+  const [editingId, setEditingId] = useState<number | null>(null);
   const [isConnected, setIsConnected] = useState<boolean | null>(null);
-  const [syncStatus, setSyncStatus] = useState<'idle' | 'syncing' | 'completed' | 'error'>('idle');
 
-  // تهيئة الشاشة
   useEffect(() => {
-    let unsubscribeNet: (() => void) | undefined;
-    let unsubscribeSync: (() => void) | undefined;
-
-    const initialize = async () => {
+    let unsubscribe: (() => void) | undefined;
+    const initializeStudentsScreen = async () => {
       try {
-        // مراقبة حالة الاتصال
-        unsubscribeNet = NetInfo.addEventListener(state => {
-          setIsConnected(state.isConnected);
-        });
-
-        // مراقبة حالة المزامنة
-        const handleSyncStatus = (status: 'syncing' | 'completed' | 'error') => {
-          setSyncStatus(status);
-          if (status === 'completed' || status === 'error') {
-            setTimeout(() => setSyncStatus('idle'), 2000);
-          }
-        };
-        syncManager.addSyncListener(handleSyncStatus);
-
-        // تحميل البيانات الأولية
-        await Promise.all([
-          loadStudents(),
-          loadOfficesAndLevels(),
-        ]);
-
-        // بدء المزامنة التلقائية
-        syncManager.autoSync();
-
+        unsubscribe = NetInfo.addEventListener(state => setIsConnected(state.isConnected));
+        await Promise.all([fetchStudents(), loadOfficesAndLevels()]);
       } catch (error) {
-        console.error('❌ خطأ في تهيئة شاشة الطلاب:', error);
-        Alert.alert('خطأ', 'فشل في تهيئة الشاشة');
+        console.error('❌ Failed to prepare StudentsScreen:', error);
+        Alert.alert('خطأ', 'فشل في تهيئة شاشة الطلاب');
       }
     };
-
-    initialize();
-
+    initializeStudentsScreen();
     return () => {
-      unsubscribeNet?.();
-      if (unsubscribeSync) {
-        syncManager.removeSyncListener(unsubscribeSync);
-      }
+      if (unsubscribe) unsubscribe();
     };
   }, []);
 
-  // تحميل بيانات الطلاب
-  const loadStudents = useCallback(async () => {
-    try {
-      const data = await getLocalStudents();
-      setStudents(data);
-      setFilteredStudents(data);
-    } catch (error: any) {
-      console.error('❌ خطأ في تحميل الطلاب:', error);
-      Alert.alert('خطأ', 'فشل في تحميل بيانات الطلاب');
-    }
-  }, []);
-
-  // تحميل المراكز والمستويات
-  const loadOfficesAndLevels = useCallback(async () => {
+  const loadOfficesAndLevels = async () => {
     try {
       const [officesData, levelsData] = await Promise.all([
         getLocalOffices(),
@@ -127,51 +86,188 @@ export default function StudentsScreen() {
       ]);
       setOffices(officesData);
       setLevels(levelsData);
-    } catch (error: any) {
+    } catch (error) {
       console.error('❌ خطأ في تحميل المراكز والمستويات:', error);
-      Alert.alert('خطأ', 'فشل في تحميل بيانات المراكز أو المستويات');
+      Alert.alert('خطأ', 'فشل في تحميل بيانات المراكز أو المستويات.');
+    }
+  };
+
+  const fetchStudents = useCallback(async () => {
+    setLoading(true);
+    try {
+      const localData = await getLocalStudents();
+      setStudents(localData);
+      setFilteredStudents(localData);
+    } catch (error: any) {
+      Alert.alert('خطأ في جلب البيانات المحلية', error.message);
+    } finally {
+      setLoading(false);
     }
   }, []);
 
-  // تحديث البيانات (Pull to Refresh)
-  const handleRefresh = useCallback(async () => {
-    setRefreshing(true);
-    try {
-      await Promise.all([
-        loadStudents(),
-        loadOfficesAndLevels(),
-      ]);
-      
-      // تشغيل المزامنة إذا كان متصلاً
-      if (isConnected) {
-        await syncManager.fullSync();
-      }
-    } catch (error: any) {
-      console.error('❌ خطأ في تحديث البيانات:', error);
-    } finally {
-      setRefreshing(false);
+  const syncDataWithSupabase = useCallback(async () => {
+    if (!isConnected) {
+      console.log('Not connected to internet, skipping Supabase sync.');
+      return;
     }
-  }, [loadStudents, loadOfficesAndLevels, isConnected]);
 
-  // فلترة الطلاب حسب البحث
+    try {
+      const unsyncedChanges = await getUnsyncedChanges();
+      if (unsyncedChanges.length > 0) {
+        console.log(`Attempting to sync ${unsyncedChanges.length} changes...`);
+      }
+
+      await Promise.all(unsyncedChanges.map(async (change) => {
+        try {
+          if (change.entity === 'students') {
+            const payload = JSON.parse(change.payload);
+            let syncSuccessful = false;
+
+            if (change.operation === 'INSERT') {
+              // جلب office_id و level_id من Supabase باستخدام UUID
+              const [officeResult, levelResult] = await Promise.all([
+                supabase.from('offices').select('id').eq('uuid', payload.office_uuid).single(),
+                supabase.from('levels').select('id').eq('uuid', payload.level_uuid).single()
+              ]);
+
+              if (officeResult.error || levelResult.error) {
+                console.error('❌ Cannot find office or level in Supabase:', officeResult.error || levelResult.error);
+                return;
+              }
+
+              const { data, error } = await supabase
+                .from('students')
+                .insert([{
+                  uuid: payload.uuid,
+                  name: payload.name,
+                  birth_date: payload.birth_date || null,
+                  phone: payload.phone || null,
+                  address: payload.address || null,
+                  office_id: officeResult.data.id,
+                  level_id: levelResult.data.id,
+                  created_at: payload.created_at,
+                  updated_at: payload.updated_at,
+                  is_synced: true
+                }])
+                .select();
+
+              if (error) {
+                if (error.code === '23505' && error.message.includes('students_name_key')) {
+                  return new Promise<void>((resolve) => {
+                    Alert.alert(
+                      'تنبيه',
+                      `اسم الطالب "${payload.name}" موجود بالفعل. هل تريد حذف الإدخال المحلي؟`,
+                      [
+                        { text: 'إلغاء', style: 'cancel', onPress: () => resolve() },
+                        {
+                          text: 'حذف',
+                          style: 'destructive',
+                          onPress: async () => {
+                            await deleteLocalStudentByUuidAndMarkSynced(payload.uuid);
+                            await clearSyncedChange(change.id);
+                            resolve();
+                          },
+                        },
+                      ]
+                    );
+                  });
+                }
+                throw error;
+              }
+              if (data && data.length > 0) {
+                await updateLocalStudentSupabaseId(change.entity_local_id, change.entity_uuid, data[0].id);
+                await markStudentAsSynced(change.entity_local_id);
+                syncSuccessful = true;
+              }
+            } 
+            else if (change.operation === 'UPDATE') {
+              // جلب office_id و level_id من Supabase باستخدام UUID
+              const [officeResult, levelResult] = await Promise.all([
+                supabase.from('offices').select('id').eq('uuid', payload.office_uuid).single(),
+                supabase.from('levels').select('id').eq('uuid', payload.level_uuid).single()
+              ]);
+
+              if (officeResult.error || levelResult.error) {
+                console.error('❌ Cannot find office or level in Supabase:', officeResult.error || levelResult.error);
+                return;
+              }
+
+              const { error } = await supabase
+                .from('students')
+                .update({
+                  name: payload.name,
+                  birth_date: payload.birth_date || null,
+                  phone: payload.phone || null,
+                  address: payload.address || null,
+                  office_id: officeResult.data.id,
+                  level_id: levelResult.data.id,
+                  updated_at: payload.updated_at,
+                  is_synced: true
+                })
+                .eq('uuid', payload.uuid)
+                .is('deleted_at', null);
+
+              if (error) throw error;
+              await markStudentAsSynced(change.entity_local_id);
+              syncSuccessful = true;
+            }
+            else if (change.operation === 'DELETE') {
+              const { error } = await supabase
+                .from('students')
+                .update({
+                  deleted_at: payload.deleted_at,
+                  updated_at: payload.updated_at,
+                  is_synced: true
+                })
+                .eq('uuid', payload.uuid)
+                .is('deleted_at', null);
+              if (error) throw error;
+              syncSuccessful = true;
+            }
+
+            if (syncSuccessful) {
+              await clearSyncedChange(change.id);
+              console.log(`✅ Synced ${change.operation} for student UUID: ${change.entity_uuid}`);
+            }
+          }
+        } catch (error: any) {
+          console.error(`❌ Error syncing change ${change.id}:`, error.message);
+          Alert.alert('خطأ في المزامنة', `حدث خطأ أثناء مزامنة: ${error.message}`);
+        }
+      }));
+
+      await fetchStudents();
+      await fetchAndSyncRemoteStudents();
+    } catch (error: any) {
+      console.error('❌ Unexpected error during syncDataWithSupabase:', error.message);
+    }
+  }, [isConnected, fetchStudents]);
+
+  useEffect(() => {
+    const init = async () => {
+      await fetchStudents();
+      if (isConnected) {
+        await syncDataWithSupabase();
+      }
+    };
+    init();
+  }, [fetchStudents, isConnected, syncDataWithSupabase]);
+
   useEffect(() => {
     if (searchQuery.trim() === '') {
       setFilteredStudents(students);
     } else {
-      const query = searchQuery.toLowerCase();
       setFilteredStudents(
         students.filter(student =>
-          student.name.toLowerCase().includes(query) ||
-          (student.office_name && student.office_name.toLowerCase().includes(query)) ||
-          (student.level_name && student.level_name.toLowerCase().includes(query)) ||
-          (student.phone && student.phone.includes(query))
+          student.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+          (student.office_name && student.office_name.toLowerCase().includes(searchQuery.toLowerCase())) ||
+          (student.level_name && student.level_name.toLowerCase().includes(searchQuery.toLowerCase()))
         )
       );
     }
   }, [searchQuery, students]);
 
-  // إعادة تعيين النموذج
-  const resetForm = useCallback(() => {
+  const resetForm = () => {
     setName('');
     setBirthDate('');
     setPhone('');
@@ -179,29 +275,9 @@ export default function StudentsScreen() {
     setSelectedOfficeUuid(null);
     setSelectedLevelUuid(null);
     setEditingId(null);
-  }, []);
+  };
 
-  // فتح نموذج إضافة طالب جديد
-  const handleAddStudent = useCallback(() => {
-    resetForm();
-    setModalVisible(true);
-  }, [resetForm]);
-
-  // فتح نموذج تعديل طالب
-  const handleEditStudent = useCallback((student: Student) => {
-    setEditingId(student.id);
-    setName(student.name);
-    setBirthDate(student.birth_date || '');
-    setPhone(student.phone || '');
-    setAddress(student.address || '');
-    setSelectedOfficeUuid(student.office_uuid);
-    setSelectedLevelUuid(student.level_uuid);
-    setModalVisible(true);
-  }, []);
-
-  // حفظ الطالب (إضافة أو تعديل)
-  const handleSaveStudent = useCallback(async () => {
-    // التحقق من صحة البيانات
+  const handleSave = async () => {
     if (!name.trim()) {
       Alert.alert('خطأ', 'يرجى إدخال اسم الطالب');
       return;
@@ -215,7 +291,6 @@ export default function StudentsScreen() {
       return;
     }
 
-    setSaving(true);
     try {
       const studentData = {
         name: name.trim(),
@@ -228,36 +303,38 @@ export default function StudentsScreen() {
 
       if (editingId) {
         await updateLocalStudent(editingId, studentData);
-        Alert.alert('نجح', 'تم تحديث بيانات الطالب بنجاح');
       } else {
         const { localId, uuid } = await insertLocalStudent(studentData);
-        console.log(`✅ تم إنشاء طالب جديد: ID=${localId}, UUID=${uuid}`);
-        Alert.alert('نجح', 'تم إضافة الطالب بنجاح');
+        console.log(`New local student created: ID=${localId}, UUID=${uuid}`);
       }
 
-      // إغلاق النموذج وتحديث البيانات
-      setModalVisible(false);
       resetForm();
-      await loadStudents();
+      setModalVisible(false);
+      await fetchStudents();
 
-      // تشغيل المزامنة إذا كان متصلاً
       if (isConnected) {
-        syncManager.autoSync();
+        await syncDataWithSupabase();
       }
-
     } catch (error: any) {
-      console.error('❌ خطأ في حفظ الطالب:', error);
-      Alert.alert('خطأ', error.message || 'فشل في حفظ بيانات الطالب');
-    } finally {
-      setSaving(false);
+      Alert.alert('خطأ', error.message);
     }
-  }, [name, birthDate, phone, address, selectedOfficeUuid, selectedLevelUuid, editingId, isConnected, resetForm, loadStudents]);
+  };
 
-  // حذف طالب
-  const handleDeleteStudent = useCallback(async (id: number, studentName: string) => {
+  const handleEdit = (student: Student) => {
+    setEditingId(student.id);
+    setName(student.name);
+    setBirthDate(student.birth_date || '');
+    setPhone(student.phone || '');
+    setAddress(student.address || '');
+    setSelectedOfficeUuid(student.office_uuid);
+    setSelectedLevelUuid(student.level_uuid);
+    setModalVisible(true);
+  };
+
+  const handleDelete = async (id: number) => {
     Alert.alert(
       'تأكيد الحذف',
-      `هل تريد حذف الطالب "${studentName}"؟`,
+      'هل تريد حذف هذا الطالب؟',
       [
         { text: 'إلغاء', style: 'cancel' },
         {
@@ -266,180 +343,157 @@ export default function StudentsScreen() {
           onPress: async () => {
             try {
               await deleteLocalStudent(id);
-              await loadStudents();
-              Alert.alert('تم الحذف', 'تم حذف الطالب بنجاح');
-
-              // تشغيل المزامنة إذا كان متصلاً
+              await fetchStudents();
+              setSearchQuery('');
               if (isConnected) {
-                syncManager.autoSync();
+                await syncDataWithSupabase();
               }
             } catch (error: any) {
-              console.error('❌ خطأ في حذف الطالب:', error);
-              Alert.alert('خطأ', error.message || 'فشل في حذف الطالب');
+              Alert.alert('خطأ في الحذف', error.message);
             }
           },
         },
       ]
     );
-  }, [isConnected, loadStudents]);
+  };
 
-  // إغلاق النموذج
-  const handleCloseModal = useCallback(() => {
-    setModalVisible(false);
-    resetForm();
-  }, [resetForm]);
-
-  // تصدير تقرير PDF
-  const handleExportPdf = useCallback(async () => {
-    if (filteredStudents.length === 0) {
-      Alert.alert('تنبيه', 'لا توجد بيانات طلاب لتصديرها');
-      return;
-    }
-
-    try {
-      await exportStudentsToPdf(filteredStudents);
-    } catch (error: any) {
-      console.error('❌ خطأ في تصدير PDF:', error);
-      Alert.alert('خطأ', 'فشل في تصدير التقرير');
-    }
-  }, [filteredStudents]);
-
-  // عرض عنصر طالب في القائمة
-  const renderStudentItem = useCallback(({ item, index }: { item: Student; index: number }) => (
+  const renderStudentItem = ({ item, index }: { item: Student; index: number }) => (
     <StudentItem
       item={item}
       index={index}
-      onEdit={() => handleEditStudent(item)}
-      onDelete={() => handleDeleteStudent(item.id, item.name)}
+      onEdit={handleEdit}
+      onDelete={handleDelete}
     />
-  ), [handleEditStudent, handleDeleteStudent]);
+  );
 
-  // مكون الحالة الفارغة
-  const EmptyState = useCallback(() => (
+  const EmptyState = () => (
     <View style={styles.emptyState}>
-      <Ionicons name="school-outline" size={64} color="#d1d5db" />
+      <Ionicons name="folder-open-outline" size={64} color="#d1d5db" />
       <Text style={styles.emptyStateText}>
         {searchQuery ? 'لا توجد نتائج للبحث' : 'لا توجد طلاب حتى الآن'}
       </Text>
       <Text style={styles.emptyStateSubtext}>
-        {searchQuery ? `عن "${searchQuery}"` : 'ابدأ بإضافة طالب جديد'}
+        {searchQuery ? `عن "${searchQuery}"` : 'ابدأ بإنشاء طالب جديد'}
       </Text>
     </View>
-  ), [searchQuery]);
+  );
 
-  // مكون عداد النتائج
-  const ResultsCount = useCallback(() => (
+  const ResultsCount = () => (
     <View style={styles.resultsContainer}>
       <Text style={styles.resultsText}>
         {filteredStudents.length} من {students.length} طالب
       </Text>
     </View>
-  ), [filteredStudents.length, students.length]);
-
-  // تحديد ما إذا كان النموذج صالحاً للحفظ
-  const isFormValid = name.trim() && selectedOfficeUuid && selectedLevelUuid;
+  );
 
   return (
     <SafeAreaView style={styles.container}>
       <StatusBar barStyle="dark-content" backgroundColor="#f8fafc" />
 
-      {/* رأس الشاشة */}
-      <View style={styles.header}>
-        <Text style={styles.title}>الطلاب</Text>
-        <View style={styles.headerActions}>
-          {/* زر تصدير التقرير */}
-          <TouchableOpacity 
-            style={styles.exportButton} 
-            onPress={handleExportPdf}
-            disabled={filteredStudents.length === 0}
-          >
-            <Ionicons name="document-text-outline" size={20} color="#6366f1" />
-            <Text style={styles.exportButtonText}>تصدير</Text>
-          </TouchableOpacity>
-
-          {/* زر إضافة طالب جديد */}
-          <TouchableOpacity style={styles.addButton} onPress={handleAddStudent}>
-            <Ionicons name="person-add" size={20} color="white" />
+<View style={styles.header}>
+    <Text style={styles.title}>الطلاب</Text>
+    <View style={{ flexDirection: 'row', gap: 10 }}>
+        {/* زر تصدير التقرير */}
+<TouchableOpacity style={styles.exportButton} onPress={() => exportStudentsToPdf(filteredStudents)}>
+    <Ionicons name="share-outline" size={24} color="#6366f1" />
+    <Text style={styles.exportButtonText}>تصدير</Text>
+</TouchableOpacity>
+        {/* زر إضافة طالب جديد */}
+        <TouchableOpacity style={styles.addButton} onPress={() => {
+            setModalVisible(true);
+            resetForm();
+        }}>
+            <Ionicons name="add-circle" size={24} color="white" />
             <Text style={styles.addButtonText}>طالب جديد</Text>
-          </TouchableOpacity>
+        </TouchableOpacity>
+    </View>
+</View>
+
+      {isConnected !== null && (
+        <View
+          style={{
+            paddingHorizontal: 16,
+            paddingVertical: 8,
+            backgroundColor: isConnected ? '#dcfce7' : '#fee2e2',
+          }}
+        >
+          <Text
+            style={{
+              color: isConnected ? '#16a34a' : '#dc2626',
+              fontWeight: 'bold',
+              textAlign: 'center',
+            }}
+          >
+            {isConnected ? 'متصل بالإنترنت' : 'غير متصل بالإنترنت'}
+          </Text>
         </View>
-      </View>
-
-      {/* مؤشر حالة المزامنة */}
-      <SyncStatus />
-
-      {/* شريط البحث */}
-      <SearchBar searchQuery={searchQuery} setSearchQuery={setSearchQuery} />
-
-      {/* عداد النتائج */}
-      {searchQuery.length > 0 && students.length > 0 && <ResultsCount />}
-
-      {/* قائمة الطلاب */}
-      {loading ? (
-        <View style={styles.loadingContainer}>
-          <ActivityIndicator size="large" color="#6366f1" />
-          <Text style={styles.loadingText}>جاري تحميل البيانات...</Text>
-        </View>
-      ) : (
-        <FlatList
-          data={filteredStudents}
-          keyExtractor={item => item.uuid || item.id.toString()}
-          renderItem={renderStudentItem}
-          ListEmptyComponent={EmptyState}
-          contentContainerStyle={styles.listContent}
-          ItemSeparatorComponent={() => <View style={styles.separator} />}
-          refreshing={refreshing}
-          onRefresh={handleRefresh}
-          showsVerticalScrollIndicator={false}
-        />
       )}
 
-      {/* نموذج إضافة/تعديل طالب */}
+      <SearchBar searchQuery={searchQuery} setSearchQuery={setSearchQuery} />
+
+      {searchQuery.length > 0 && students.length > 0 && <ResultsCount />}
+
+    <FlatList
+        data={filteredStudents}
+        keyExtractor={item => item.uuid || item.id.toString()}
+        refreshing={loading}
+        onRefresh={async () => {
+          await fetchStudents();
+          if (isConnected) {
+            await syncDataWithSupabase();
+          }
+        }}
+        renderItem={renderStudentItem}
+        ListEmptyComponent={EmptyState}
+        contentContainerStyle={styles.listContent}
+        ItemSeparatorComponent={() => <View style={styles.separator} />}
+      />
+
       <Modal
         visible={modalVisible}
-        animationType="slide"
+        animationType="fade"
         transparent
-        onRequestClose={handleCloseModal}
+        onRequestClose={() => {
+          setModalVisible(false);
+          resetForm();
+        }}
       >
         <View style={styles.modalOverlay}>
-          <View style={styles.modalContainer}>
-            {/* رأس النموذج */}
-            <View style={styles.modalHeader}>
-              <Text style={styles.modalTitle}>
-                {editingId ? 'تعديل بيانات الطالب' : 'إضافة طالب جديد'}
-              </Text>
-              <TouchableOpacity style={styles.closeButton} onPress={handleCloseModal}>
-                <Ionicons name="close" size={24} color="#6b7280" />
-              </TouchableOpacity>
-            </View>
+          <ScrollView contentContainerStyle={styles.modalScroll}>
+            <View style={styles.modalContainer}>
+              <View style={styles.modalHeader}>
+                <Text style={styles.modalTitle}>
+                  {editingId ? 'تعديل الطالب' : 'إنشاء طالب جديد'}
+                </Text>
+                <TouchableOpacity
+                  style={styles.closeButton}
+                  onPress={() => {
+                    setModalVisible(false);
+                    resetForm();
+                  }}
+                >
+                  <Ionicons name="close" size={24} color="#6b7280" />
+                </TouchableOpacity>
+              </View>
 
-            {/* محتوى النموذج */}
-            <ScrollView style={styles.modalBody} showsVerticalScrollIndicator={false}>
-              {/* اسم الطالب */}
-              <View style={styles.fieldContainer}>
+              <View style={styles.modalBody}>
                 <Text style={styles.label}>اسم الطالب *</Text>
                 <TextInput
                   value={name}
                   onChangeText={setName}
                   placeholder="أدخل اسم الطالب"
                   style={styles.input}
-                  textAlign="right"
+                  textAlign={Platform.OS === 'android' ? 'right' : 'left'}
                   autoFocus
                 />
-              </View>
 
-              {/* تاريخ الميلاد */}
-              <View style={styles.fieldContainer}>
                 <Text style={styles.label}>تاريخ الميلاد</Text>
                 <DatePickerInput
                   value={birthDate}
                   onDateChange={setBirthDate}
-                  placeholder="اختر تاريخ الميلاد"
+                  placeholder="تاريخ الميلاد (YYYY-MM-DD)"
                 />
-              </View>
 
-              {/* رقم الهاتف */}
-              <View style={styles.fieldContainer}>
                 <Text style={styles.label}>رقم الهاتف</Text>
                 <TextInput
                   value={phone}
@@ -447,33 +501,24 @@ export default function StudentsScreen() {
                   placeholder="أدخل رقم الهاتف"
                   style={styles.input}
                   keyboardType="phone-pad"
-                  textAlign="right"
+                  textAlign={Platform.OS === 'android' ? 'right' : 'left'}
                 />
-              </View>
 
-              {/* العنوان */}
-              <View style={styles.fieldContainer}>
                 <Text style={styles.label}>عنوان السكن</Text>
                 <TextInput
                   value={address}
                   onChangeText={setAddress}
                   placeholder="أدخل عنوان السكن"
-                  style={[styles.input, styles.textArea]}
-                  multiline
-                  numberOfLines={3}
-                  textAlign="right"
-                  textAlignVertical="top"
+                  style={styles.input}
+                  textAlign={Platform.OS === 'android' ? 'right' : 'left'}
                 />
-              </View>
 
-              {/* المركز */}
-              <View style={styles.fieldContainer}>
                 <Text style={styles.label}>المركز *</Text>
                 <View style={styles.pickerContainer}>
                   <Picker
                     selectedValue={selectedOfficeUuid}
-                    onValueChange={setSelectedOfficeUuid}
-                    style={styles.picker}
+                    onValueChange={(itemValue) => setSelectedOfficeUuid(itemValue)}
+                    itemStyle={styles.pickerItem}
                   >
                     <Picker.Item label="اختر المركز..." value={null} />
                     {offices.map(office => (
@@ -485,16 +530,13 @@ export default function StudentsScreen() {
                     ))}
                   </Picker>
                 </View>
-              </View>
 
-              {/* المستوى */}
-              <View style={styles.fieldContainer}>
                 <Text style={styles.label}>المستوى *</Text>
                 <View style={styles.pickerContainer}>
                   <Picker
                     selectedValue={selectedLevelUuid}
-                    onValueChange={setSelectedLevelUuid}
-                    style={styles.picker}
+                    onValueChange={(itemValue) => setSelectedLevelUuid(itemValue)}
+                    itemStyle={styles.pickerItem}
                   >
                     <Picker.Item label="اختر المستوى..." value={null} />
                     {levels.map(level => (
@@ -507,37 +549,26 @@ export default function StudentsScreen() {
                   </Picker>
                 </View>
               </View>
-            </ScrollView>
 
-            {/* أزرار النموذج */}
-            <View style={styles.modalFooter}>
-              <TouchableOpacity
-                style={[styles.modalButton, styles.cancelButton]}
-                onPress={handleCloseModal}
-                disabled={saving}
-              >
-                <Text style={styles.cancelText}>إلغاء</Text>
-              </TouchableOpacity>
-              
-              <TouchableOpacity
-                style={[
-                  styles.modalButton, 
-                  styles.saveButton,
-                  (!isFormValid || saving) && styles.saveButtonDisabled
-                ]}
-                onPress={handleSaveStudent}
-                disabled={!isFormValid || saving}
-              >
-                {saving ? (
-                  <ActivityIndicator size="small" color="white" />
-                ) : (
-                  <Text style={styles.saveText}>
-                    {editingId ? 'تحديث' : 'إضافة'}
-                  </Text>
-                )}
-              </TouchableOpacity>
+              <View style={styles.modalFooter}>
+                <TouchableOpacity
+                  style={[styles.modalButton, styles.cancelButton]}
+                  onPress={() => {
+                    setModalVisible(false);
+                    resetForm();
+                  }}
+                >
+                  <Text style={styles.cancelText}>إلغاء</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.modalButton, styles.saveButton]}
+                  onPress={handleSave}
+                >
+                  <Text style={styles.saveText}>{editingId ? 'تحديث' : 'إنشاء'}</Text>
+                </TouchableOpacity>
+              </View>
             </View>
-          </View>
+          </ScrollView>
         </View>
       </Modal>
     </SafeAreaView>
@@ -545,49 +576,16 @@ export default function StudentsScreen() {
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#f8fafc',
-  },
+  container: { flex: 1, backgroundColor: '#f8fafc' },
   header: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
     padding: 16,
-    backgroundColor: 'white',
     borderBottomWidth: 1,
     borderBottomColor: '#e2e8f0',
-    elevation: 2,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.05,
-    shadowRadius: 2,
   },
-  title: {
-    fontSize: 28,
-    fontWeight: 'bold',
-    color: '#1e293b',
-  },
-  headerActions: {
-    flexDirection: 'row',
-    gap: 12,
-  },
-  exportButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 16,
-    paddingVertical: 8,
-    borderRadius: 8,
-    backgroundColor: '#e0e7ff',
-    borderWidth: 1,
-    borderColor: '#6366f1',
-    gap: 6,
-  },
-  exportButtonText: {
-    color: '#6366f1',
-    fontWeight: '600',
-    fontSize: 14,
-  },
+  title: { fontSize: 28, fontWeight: 'bold', color: '#1e293b' },
   addButton: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -595,72 +593,73 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingVertical: 8,
     borderRadius: 8,
-    gap: 6,
+    gap: 8,
   },
-  addButtonText: {
-    color: 'white',
-    fontWeight: '600',
-    fontSize: 14,
+  addButtonText: { color: 'white', fontWeight: '600', fontSize: 14 },
+  resultsContainer: { marginHorizontal: 16, marginBottom: 12 },
+  resultsText: { fontSize: 14, color: '#64748b' },
+  listContent: { paddingHorizontal: 16, paddingBottom: 20 },
+  studentItem: {
+    backgroundColor: 'white',
+    padding: 16,
+    borderRadius: 12,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+    elevation: 2,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.05,
+    shadowRadius: 2,
   },
-  loadingContainer: {
-    flex: 1,
+  studentInfo: { flexDirection: 'row', alignItems: 'flex-start', gap: 12, flex: 1 },
+  serialNumber: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: '#e0e7ff',
     justifyContent: 'center',
     alignItems: 'center',
-    gap: 12,
+    marginTop: 4,
   },
-  loadingText: {
-    fontSize: 16,
-    color: '#6b7280',
+  serialText: { fontSize: 14, fontWeight: 'bold', color: '#6366f1' },
+  studentDetails: { flex: 1 },
+  nameContainer: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', marginBottom: 4 },
+  studentName: { fontSize: 16, fontWeight: '600', color: '#1e293b', marginRight: 8 },
+  syncStatus: { fontSize: 12, color: 'orange', fontWeight: 'bold' },
+  studentId: { fontSize: 12, color: '#6b7280', marginBottom: 2 },
+  studentDetail: { fontSize: 13, color: '#475569', marginBottom: 2 },
+  studentActions: { flexDirection: 'column', gap: 8, marginTop: 4 },
+  actionButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 6,
   },
-  resultsContainer: {
-    marginHorizontal: 16,
-    marginBottom: 8,
-  },
-  resultsText: {
-    fontSize: 14,
-    color: '#64748b',
-    fontWeight: '500',
-  },
-  listContent: {
-    paddingHorizontal: 16,
-    paddingBottom: 20,
-  },
-  separator: {
-    height: 12,
-  },
+  editButton: { backgroundColor: '#eff6ff' },
+  deleteButton: { backgroundColor: '#fef2f2' },
+  editText: { color: '#3b82f6', fontSize: 12, fontWeight: '600' },
+  deleteText: { color: '#ef4444', fontSize: 12, fontWeight: '600' },
+  separator: { height: 8 },
   emptyState: {
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
-    paddingVertical: 80,
-    gap: 12,
+    paddingVertical: 60,
   },
-  emptyStateText: {
-    fontSize: 18,
-    color: '#6b7280',
-    fontWeight: '600',
-    textAlign: 'center',
-  },
-  emptyStateSubtext: {
-    fontSize: 14,
-    color: '#9ca3af',
-    textAlign: 'center',
-  },
-  modalOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.5)',
-    justifyContent: 'flex-end',
-  },
+  emptyStateText: { fontSize: 18, color: '#6b7280', marginTop: 16 },
+  emptyStateSubtext: { fontSize: 14, color: '#9ca3af', marginTop: 4 },
+  modalOverlay: { flex: 1, backgroundColor: 'rgba(0, 0, 0, 0.5)' },
+  modalScroll: { flexGrow: 1, justifyContent: 'center', padding: 20 },
   modalContainer: {
     backgroundColor: 'white',
-    borderTopLeftRadius: 20,
-    borderTopRightRadius: 20,
-    maxHeight: '90%',
-    elevation: 10,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: -2 },
-    shadowOpacity: 0.1,
-    shadowRadius: 8,
+    borderRadius: 16,
+    maxWidth: 400,
+    width: '100%',
+    alignSelf: 'center',
+    elevation: 8,
   },
   modalHeader: {
     flexDirection: 'row',
@@ -670,49 +669,31 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
     borderBottomColor: '#e5e7eb',
   },
-  modalTitle: {
-    fontSize: 20,
-    fontWeight: 'bold',
-    color: '#1e293b',
-  },
-  closeButton: {
-    padding: 4,
-  },
-  modalBody: {
-    maxHeight: 400,
-    paddingHorizontal: 20,
-  },
-  fieldContainer: {
-    marginBottom: 20,
-  },
-  label: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: '#374151',
-    marginBottom: 8,
-  },
+  modalTitle: { fontSize: 20, fontWeight: 'bold', color: '#1e293b' },
+  closeButton: { padding: 4 },
+  modalBody: { padding: 20 },
+  label: { fontSize: 14, fontWeight: '600', color: '#374151', marginBottom: 8 },
   input: {
     borderWidth: 1,
     borderColor: '#d1d5db',
     borderRadius: 8,
     paddingHorizontal: 12,
-    paddingVertical: 12,
+    paddingVertical: 8,
     fontSize: 16,
     color: '#1e293b',
-    backgroundColor: 'white',
-  },
-  textArea: {
-    minHeight: 80,
+    textAlign: 'right',
+    marginBottom: 12,
   },
   pickerContainer: {
     borderWidth: 1,
     borderColor: '#d1d5db',
     borderRadius: 8,
-    backgroundColor: 'white',
+    marginBottom: 12,
     overflow: 'hidden',
   },
-  picker: {
-    height: 50,
+  pickerItem: {
+    textAlign: 'right',
+    height: 120,
   },
   modalFooter: {
     flexDirection: 'row',
@@ -721,36 +702,38 @@ const styles = StyleSheet.create({
     padding: 20,
     borderTopWidth: 1,
     borderTopColor: '#e5e7eb',
-    backgroundColor: '#f9fafb',
   },
   modalButton: {
-    paddingHorizontal: 24,
-    paddingVertical: 12,
+    paddingHorizontal: 20,
+    paddingVertical: 10,
     borderRadius: 8,
-    minWidth: 100,
+    minWidth: 80,
     alignItems: 'center',
-    justifyContent: 'center',
   },
-  cancelButton: {
-    backgroundColor: '#f3f4f6',
-    borderWidth: 1,
-    borderColor: '#d1d5db',
-  },
-  saveButton: {
-    backgroundColor: '#6366f1',
-  },
-  saveButtonDisabled: {
-    backgroundColor: '#a5b4fc',
-    opacity: 0.6,
-  },
-  cancelText: {
-    color: '#374151',
-    fontWeight: '600',
-    fontSize: 16,
-  },
-  saveText: {
-    color: 'white',
-    fontWeight: '600',
-    fontSize: 16,
-  },
+  cancelButton: { backgroundColor: '#f3f4f6' },
+  saveButton: { backgroundColor: '#6366f1' },
+  cancelText: { color: '#374151', fontWeight: '600' },
+  saveText: { color: 'white', fontWeight: '600' },
+
+   
+    exportButton: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        paddingHorizontal: 16,
+        paddingVertical: 8,
+        borderRadius: 8,
+        gap: 8,
+        backgroundColor: '#e0e7ff',
+        borderWidth: 1,
+        borderColor: '#6366f1',
+    },
+    exportButtonText: {
+        color: '#6366f1',
+        fontWeight: '600',
+        fontSize: 14
+    },
+  
+    
 });
+
+
