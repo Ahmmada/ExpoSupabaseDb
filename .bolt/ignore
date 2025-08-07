@@ -1,8 +1,11 @@
-.vscode/*
-android/
-ios/*
-assets/*
-scripts/
+.vscode.
+android.
+ios.
+assets.
+components.
+constants.
+hooks.
+scripts.
 .gitignore
 README.md
 package.json
