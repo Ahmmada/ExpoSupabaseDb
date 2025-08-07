@@ -8,6 +8,7 @@ hooks/
 scripts/
 .gitignore
 README.md
+app.json
 package.json
 package-lock.json
 eas.json
